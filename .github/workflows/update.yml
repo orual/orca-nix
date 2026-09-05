@@ -5,13 +5,18 @@ on:
     - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Specific version to update to'
+      rev:
+        description: 'Fork commit, branch, or tag to update to (default: main)'
         required: false
+        default: main
+        type: string
 
 permissions:
   contents: write
   pull-requests: write
+
+env:
+  ORCA_REPO: sjennings/orca
 
 jobs:
   check-update:
@@ -30,53 +35,45 @@ jobs:
         env:
           NIX_FIRST_BUILD_UID: 400
 
-      - name: Check for new version
+      - name: Check fork revision
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_REV: ${{ github.event.inputs.rev || 'main' }}
         run: |
-          CURRENT_VERSION=$(sed -n 's/.*version = "\([^"]*\)".*/\1/p' package.nix | head -1)
-          echo "Current version: $CURRENT_VERSION"
+          set -euo pipefail
 
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            LATEST_VERSION="${{ github.event.inputs.version }}"
-          else
-            LATEST_VERSION=$(gh api repos/stablyai/orca/releases/latest --jq '.tag_name' | sed 's/^v//' || echo "")
+          if [[ -z "$REQUESTED_REV" || ! "$REQUESTED_REV" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid revision: $REQUESTED_REV" >&2
+            exit 1
           fi
 
-          if [ -z "$LATEST_VERSION" ]; then
-            echo "Could not fetch latest version"
-            exit 0
+          current_revision=$(sed -n 's/.*sourceRev = "\([^"]*\)".*/\1/p' package.nix | head -1)
+          selected_revision=$(gh api "repos/$ORCA_REPO/commits/$REQUESTED_REV" --jq '.sha')
+          if [[ ! "$selected_revision" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Fork ref did not resolve to a full commit: $REQUESTED_REV" >&2
+            exit 1
           fi
+          selected_revision=${selected_revision,,}
 
-          echo "Latest version: $LATEST_VERSION"
-
-          if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
-            echo "new_version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
-            echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
-            echo "update_needed=true" >> "$GITHUB_OUTPUT"
-          else
+          echo "Current revision: $current_revision"
+          echo "Selected revision: $selected_revision"
+          echo "current_revision=$current_revision" >> "$GITHUB_OUTPUT"
+          echo "revision=$selected_revision" >> "$GITHUB_OUTPUT"
+          if [[ "$current_revision" == "$selected_revision" ]]; then
             echo "update_needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "update_needed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Enable AppImage sandbox support
-        if: steps.check.outputs.update_needed == 'true'
-        run: |
-          # Nix's AppImage wrapper uses bubblewrap. Ubuntu runners may restrict
-          # unprivileged user namespaces, which makes the Orca CLI smoke test
-          # fail with: bwrap: setting up uid map: Permission denied.
-          if sysctl kernel.unprivileged_userns_clone >/dev/null 2>&1; then
-            sudo sysctl -w kernel.unprivileged_userns_clone=1
-          fi
-          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-
-      - name: Update version
+      - name: Update source revision
         if: steps.check.outputs.update_needed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/update.sh --version "${{ steps.check.outputs.new_version }}"
+          UPDATE_REVISION: ${{ steps.check.outputs.revision }}
+        run: |
+          set -euo pipefail
+          ./scripts/update.sh --rev "$UPDATE_REVISION"
 
       - name: Create Pull Request
         if: steps.check.outputs.update_needed == 'true'
@@ -84,21 +81,22 @@ jobs:
         uses: peter-evans/create-pull-request@v8.1.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore: update orca to version ${{ steps.check.outputs.new_version }}"
-          title: "chore: update orca to version ${{ steps.check.outputs.new_version }}"
+          commit-message: "chore: update orca to revision ${{ steps.check.outputs.revision }}"
+          title: "chore: update orca to revision ${{ steps.check.outputs.revision }}"
           body: |
             ## Update Orca
 
-            This PR updates Orca from version ${{ steps.check.outputs.current_version }} to ${{ steps.check.outputs.new_version }}.
+            This PR updates the pinned `sjennings/orca` source revision.
 
-            ### Changes
-            - Updated `version` in `package.nix`
-            - Updated x86_64-linux and aarch64-linux AppImage hashes
-            - Updated `flake.lock`
+            - Previous revision: `${{ steps.check.outputs.current_revision }}`
+            - New revision: `${{ steps.check.outputs.revision }}`
+            - The package version is read from the selected source `package.json`.
+            - Source and pnpm dependency hashes are refreshed and the package is build- and CLI-checked.
+            - `flake.lock` is intentionally unchanged.
 
             ---
             This PR was automatically generated by the update workflow.
-          branch: update-orca-${{ steps.check.outputs.new_version }}
+          branch: update-orca-${{ steps.check.outputs.revision }}
           delete-branch: true
           labels: |
             dependencies
@@ -109,22 +107,28 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr merge ${{ steps.create-pr.outputs.pull-request-number }} --auto --squash --delete-branch
+          PR_NUMBER: ${{ steps.create-pr.outputs.pull-request-number }}
+        run: gh pr merge "$PR_NUMBER" --auto --squash --delete-branch
 
       - name: Summary
         if: always()
+        env:
+          UPDATE_NEEDED: ${{ steps.check.outputs.update_needed }}
+          CURRENT_REVISION: ${{ steps.check.outputs.current_revision }}
+          SELECTED_REVISION: ${{ steps.check.outputs.revision }}
         run: |
+          set -euo pipefail
           echo "## Update Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "${{ steps.check.outputs.update_needed }}" = "true" ]; then
-            echo "- Current Version: ${{ steps.check.outputs.current_version }}" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Latest Version: ${{ steps.check.outputs.new_version }}" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$UPDATE_NEEDED" == "true" ]]; then
+            echo "- Current revision: $CURRENT_REVISION" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Selected revision: $SELECTED_REVISION" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "Pull request created. Auto-merge was attempted when supported." >> "$GITHUB_STEP_SUMMARY"
           else
-            CURRENT_VERSION=$(sed -n 's/.*version = "\([^"]*\)".*/\1/p' package.nix | head -1)
-            echo "- Current Version: $CURRENT_VERSION" >> "$GITHUB_STEP_SUMMARY"
+            CURRENT_REVISION=$(sed -n 's/.*sourceRev = "\([^"]*\)".*/\1/p' package.nix | head -1)
+            echo "- Current revision: $CURRENT_REVISION" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "Already up to date." >> "$GITHUB_STEP_SUMMARY"
           fi
