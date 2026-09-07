@@ -54,13 +54,13 @@
 let
   pname = "orca";
   version = "1.4.197";
-  sourceRev = "38aab26e17f9eefb20b5d18eccbdf525fb54ff09";
+  sourceRev = "2441c59e09b12fcb34465eaa3331171771b59a6e";
 
   src = fetchFromGitHub {
     owner = "orual";
     repo = "orca";
     rev = sourceRev;
-    hash = "sha256-zzi01T/sFia09mlop6Wv3s49oR4AhdTo6GMvsjwcyYQ=";
+    hash = "sha256-xHDSKdgU4fm8IJJVc2PLgZiV8ZyddrJh7S9FC1SSz5c=";
   };
 
   pnpmDeps = fetchPnpmDeps {
