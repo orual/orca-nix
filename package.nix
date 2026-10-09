@@ -129,6 +129,8 @@ in
 stdenv.mkDerivation {
   inherit pname version src;
 
+  patches = [ ./patches/verify-linux-after-pruning.patch ];
+
   nativeBuildInputs = [
     nodejs_24
     pnpm_11
