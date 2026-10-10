@@ -50,7 +50,22 @@ nix build .#orca
 ./result/bin/orca-ide
 ```
 
-The source package is built and CLI-smoke-tested on `x86_64-linux`. `aarch64-linux` is exposed and evaluates, but has not been build-tested.
+The source package is built and CLI-smoke-tested on `x86_64-linux`. To build the ARM package on an x86 machine, enable NixOS `boot.binfmt.emulatedSystems = [ "aarch64-linux" ];`, then run:
+
+```bash
+nix build .#packages.aarch64-linux.orca
+```
+
+This runs an ARM build under emulation, not `pkgsCross` cross-compilation. The build detects an ARM QEMU interpreter through `/proc/$$/exe` and limits the bundler's Rayon and blocking thread pools to avoid renderer bundling stalls under emulation. Native ARM builds retain their normal thread settings. Minification remains enabled.
+
+Orca's native-binary compatibility check runs after target-specific dependency pruning, so unused x86 Parcel watcher binaries do not fail ARM packaging. Architecture and symbol compatibility checks remain enabled for the final package.
+
+Run the packaging regression tests against the pinned source with:
+
+```bash
+nix build .#orca.src --out-link result-source
+node tests/arm-packaging.cjs ./result-source
+```
 
 The pinned toolchain uses Node 24, Electron 43, and nixpkgs' pnpm 11. Upstream declares pnpm 12; the Nix dependency hook uses its lockfile-compatibility settings to install the pinned v9 lockfile with pnpm 11. Orca and its patched `node-pty` addon are compiled locally; Electron comes from nixpkgs. The Linux glibc compatibility check targets the Nix runtime rather than upstream's Ubuntu 20.04 baseline.
 

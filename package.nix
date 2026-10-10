@@ -184,6 +184,13 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
+    case "$(readlink /proc/$$/exe)" in
+      */qemu-aarch64|*/qemu-aarch64-static)
+        export RAYON_NUM_THREADS=1
+        export ROLLDOWN_MAX_BLOCKING_THREADS=1
+        echo "Limiting bundler thread pools under ARM emulation"
+        ;;
+    esac
     pnpm run build:desktop
     ELECTRON_OVERRIDE_DIST_PATH="$PWD/node_modules/electron/dist" \
       pnpm exec electron-builder --config config/electron-builder.config.cjs --linux --dir \
